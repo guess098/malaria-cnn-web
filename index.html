@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Malaria RBC Screener (Scratch CNN)</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #f4f6f9;
+      color: #1f2937;
+      display: flex;
+      justify-content: center;
+      padding: 24px;
+      margin: 0;
+    }
+    .card {
+      background: #ffffff;
+      max-width: 460px;
+      width: 100%;
+      padding: 24px;
+      border-radius: 14px;
+      box-shadow: 0 4px 18px rgba(0, 0, 0, 0.08);
+    }
+    h1 { font-size: 1.35rem; margin: 0 0 6px; }
+    .sub { font-size: 0.9rem; color: #6b7280; margin: 0 0 16px; }
+    .status {
+      font-size: 0.9rem;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: #eef2ff;
+      color: #3730a3;
+      margin-bottom: 16px;
+    }
+    input[type="file"] { width: 100%; margin-bottom: 16px; }
+    #preview {
+      display: none;
+      width: 160px;
+      height: 160px;
+      object-fit: contain;
+      background: #000;
+      border-radius: 10px;
+      margin: 0 auto 16px;
+    }
+    .result {
+      display: none;
+      padding: 14px;
+      border-radius: 10px;
+      text-align: center;
+      margin-bottom: 16px;
+    }
+    .parasitized { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+    .uninfected  { background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }
+    .verdict { font-size: 1.25rem; font-weight: 700; }
+    .prob { font-size: 0.95rem; margin-top: 4px; }
+    .slider-box { margin: 14px 0; font-size: 0.9rem; }
+    .slider-box input { width: 100%; }
+    .disclaimer {
+      font-size: 0.78rem;
+      color: #6b7280;
+      border-top: 1px solid #e5e7eb;
+      padding-top: 12px;
+      margin-top: 12px;
+      line-height: 1.45;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Malaria Cell Screener</h1>
+    <p class="sub">Scratch-built CNN running 100% locally in your browser.</p>
+
+    <div id="status" class="status">Loading neural network...</div>
+
+    <input type="file" id="uploader" accept="image/*" disabled />
+    <img id="preview" alt="Uploaded red blood cell preview" />
+
+    <div id="result" class="result">
+      <div id="verdict" class="verdict"></div>
+      <div id="probText" class="prob"></div>
+    </div>
+
+    <div class="slider-box">
+      <label for="threshold">
+        Decision threshold: <strong><span id="threshVal">0.50</span></strong>
+        (lower = higher sensitivity)
+      </label>
+      <input type="range" id="threshold" min="0.10" max="0.90" step="0.05" value="0.50" />
+    </div>
+
+    <div class="disclaimer">
+      <strong>Educational prototype only — not for clinical diagnosis.</strong>
+      Upload a single cropped thin-smear red blood cell image (not a full microscope field).
+      Images never leave your device.
+    </div>
+  </div>
+
+  <script>
+    let model = null;
+    let lastProb = null;
+
+    const statusEl = document.getElementById("status");
+    const uploader = document.getElementById("uploader");
+    const preview = document.getElementById("preview");
+    const resultEl = document.getElementById("result");
+    const verdictEl = document.getElementById("verdict");
+    const probTextEl = document.getElementById("probText");
+    const thresholdSlider = document.getElementById("threshold");
+    const threshValEl = document.getElementById("threshVal");
+
+    async function loadModel() {
+      const paths = ["./model.json", "./tfjs_model/model.json"];
+      for (const path of paths) {
+        try {
+          model = await tf.loadGraphModel(path);
+          statusEl.textContent = "Model ready! Upload a cropped red blood cell image.";
+          uploader.disabled = false;
+          return;
+        } catch (err) {
+          console.warn("Could not load from", path, err);
+        }
+      }
+      statusEl.textContent = "Error loading model. Make sure model.json and group1-shard1of1.bin are uploaded.";
+    }
+
+    function updateDisplay() {
+      if (lastProb === null) return;
+      const cutoff = parseFloat(thresholdSlider.value);
+      const isParasitized = lastProb > cutoff;
+
+      resultEl.style.display = "block";
+      resultEl.className = "result " + (isParasitized ? "parasitized" : "uninfected");
+      verdictEl.textContent = isParasitized ? "Parasitized" : "Uninfected";
+      probTextEl.textContent = `Parasitized probability: ${(lastProb * 100).toFixed(1)}%`;
+    }
+
+    uploader.addEventListener("change", (event) => {
+      const file = event.target.files[0];
+      if (!file || !model) return;
+
+      preview.src = URL.createObjectURL(file);
+      preview.style.display = "block";
+
+      preview.onload = () => {
+        try {
+          lastProb = tf.tidy(() => {
+            const imgTensor = tf.browser.fromPixels(preview, 3).toFloat();
+            const resized = tf.image.resizeBilinear(imgTensor, [64, 64]);
+            const batched = resized.expandDims(0); // [1, 64, 64, 3]
+            const rawOut = model.predict(batched);
+            let outTensor = rawOut;
+            if (Array.isArray(rawOut)) {
+              outTensor = rawOut[0];
+            } else if (rawOut && typeof rawOut.dataSync !== "function") {
+              outTensor = Object.values(rawOut)[0];
+            }
+            return outTensor.dataSync()[0];
+          });
+          updateDisplay();
+        } catch (err) {
+          statusEl.textContent = "Prediction error: " + err.message;
+          console.error(err);
+        }
+      };
+    });
+
+    thresholdSlider.addEventListener("input", () => {
+      threshValEl.textContent = parseFloat(thresholdSlider.value).toFixed(2);
+      updateDisplay();
+    });
+
+    loadModel();
+  </script>
+</body>
+</html>
