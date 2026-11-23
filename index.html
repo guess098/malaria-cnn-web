@@ -33,6 +33,47 @@
       color: #3730a3;
       margin-bottom: 16px;
     }
+    .sample-label {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #374151;
+      margin-bottom: 8px;
+    }
+    .sample-row {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    .sample-btn {
+      flex: 1;
+      padding: 10px 12px;
+      border-radius: 8px;
+      font-size: 0.88rem;
+      font-weight: 600;
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: opacity 0.15s ease;
+    }
+    .sample-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .btn-parasitized {
+      background: #fef2f2;
+      color: #991b1b;
+      border-color: #fecaca;
+    }
+    .btn-uninfected {
+      background: #ecfdf5;
+      color: #065f46;
+      border-color: #a7f3d0;
+    }
+    .divider {
+      text-align: center;
+      font-size: 0.8rem;
+      color: #9ca3af;
+      margin: 10px 0 12px;
+    }
     input[type="file"] { width: 100%; margin-bottom: 16px; }
     #preview {
       display: none;
@@ -73,8 +114,20 @@
 
     <div id="status" class="status">Loading neural network...</div>
 
+    <div class="sample-label">Quick test with built-in samples:</div>
+    <div class="sample-row">
+      <button type="button" id="btnParasitized" class="sample-btn btn-parasitized" disabled>
+        Parasitized Sample
+      </button>
+      <button type="button" id="btnUninfected" class="sample-btn btn-uninfected" disabled>
+        Uninfected Sample
+      </button>
+    </div>
+
+    <div class="divider">— or upload your own cropped RBC image —</div>
+
     <input type="file" id="uploader" accept="image/*" disabled />
-    <img id="preview" alt="Uploaded red blood cell preview" />
+    <img id="preview" crossorigin="anonymous" alt="Red blood cell preview" />
 
     <div id="result" class="result">
       <div id="verdict" class="verdict"></div>
@@ -99,9 +152,13 @@
   <script>
     let model = null;
     let lastProb = null;
+    let currentObjectUrl = null;
+    let currentSourceKey = null;
 
     const statusEl = document.getElementById("status");
     const uploader = document.getElementById("uploader");
+    const btnParasitized = document.getElementById("btnParasitized");
+    const btnUninfected = document.getElementById("btnUninfected");
     const preview = document.getElementById("preview");
     const resultEl = document.getElementById("result");
     const verdictEl = document.getElementById("verdict");
@@ -114,8 +171,10 @@
       for (const path of paths) {
         try {
           model = await tf.loadGraphModel(path);
-          statusEl.textContent = "Model ready! Upload a cropped red blood cell image.";
+          statusEl.textContent = "Model ready! Try a sample cell below or upload your own.";
           uploader.disabled = false;
+          btnParasitized.disabled = false;
+          btnUninfected.disabled = false;
           return;
         } catch (err) {
           console.warn("Could not load from", path, err);
@@ -135,34 +194,70 @@
       probTextEl.textContent = `Parasitized probability: ${(lastProb * 100).toFixed(1)}%`;
     }
 
+    function runPrediction() {
+      if (!model) return;
+      try {
+        lastProb = tf.tidy(() => {
+          const imgTensor = tf.browser.fromPixels(preview, 3).toFloat();
+          const resized = tf.image.resizeBilinear(imgTensor, [64, 64]);
+          const batched = resized.expandDims(0); // [1, 64, 64, 3]
+          const rawOut = model.predict(batched);
+          let outTensor = rawOut;
+          if (Array.isArray(rawOut)) {
+            outTensor = rawOut[0];
+          } else if (rawOut && typeof rawOut.dataSync !== "function") {
+            outTensor = Object.values(rawOut)[0];
+          }
+          return outTensor.dataSync()[0];
+        });
+        updateDisplay();
+      } catch (err) {
+        statusEl.textContent = "Prediction error: " + err.message;
+        console.error(err);
+      }
+    }
+
+    preview.onload = runPrediction;
+
+    preview.onerror = () => {
+      preview.style.display = "none";
+      resultEl.style.display = "none";
+      statusEl.textContent = "Sample image not found. Check that sample_parasitized.png and sample_uninfected.png are uploaded with exact lowercase names.";
+    };
+
+    function testSample(filePath, labelText) {
+      if (!model) return;
+      uploader.value = "";
+      statusEl.textContent = `Showing built-in sample: ${labelText}`;
+      preview.style.display = "block";
+
+      if (currentSourceKey === filePath && preview.complete && preview.naturalWidth > 0) {
+        runPrediction();
+        return;
+      }
+      currentSourceKey = filePath;
+      preview.src = filePath;
+    }
+
+    btnParasitized.addEventListener("click", () => {
+      testSample("./sample_parasitized.png", "Parasitized RBC (ground truth)");
+    });
+
+    btnUninfected.addEventListener("click", () => {
+      testSample("./sample_uninfected.png", "Uninfected RBC (ground truth)");
+    });
+
     uploader.addEventListener("change", (event) => {
       const file = event.target.files[0];
       if (!file || !model) return;
 
-      preview.src = URL.createObjectURL(file);
-      preview.style.display = "block";
+      if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
+      currentObjectUrl = URL.createObjectURL(file);
+      currentSourceKey = currentObjectUrl;
 
-      preview.onload = () => {
-        try {
-          lastProb = tf.tidy(() => {
-            const imgTensor = tf.browser.fromPixels(preview, 3).toFloat();
-            const resized = tf.image.resizeBilinear(imgTensor, [64, 64]);
-            const batched = resized.expandDims(0); // [1, 64, 64, 3]
-            const rawOut = model.predict(batched);
-            let outTensor = rawOut;
-            if (Array.isArray(rawOut)) {
-              outTensor = rawOut[0];
-            } else if (rawOut && typeof rawOut.dataSync !== "function") {
-              outTensor = Object.values(rawOut)[0];
-            }
-            return outTensor.dataSync()[0];
-          });
-          updateDisplay();
-        } catch (err) {
-          statusEl.textContent = "Prediction error: " + err.message;
-          console.error(err);
-        }
-      };
+      statusEl.textContent = `Testing uploaded image: ${file.name}`;
+      preview.style.display = "block";
+      preview.src = currentObjectUrl;
     });
 
     thresholdSlider.addEventListener("input", () => {
